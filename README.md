@@ -1,9 +1,14 @@
-# go-example
+# scorecard
 
-A minimal Go application for [fly.io Getting Started](https://fly.io/docs/getting-started/golang/) documentation and tutorials.
+> a minimal leaderboard backed by a Google Sheets
 
-To get started:
+## development
 
-1. clone this repo
-2. `flyctl launch`
-3. view the deployed app with flyctl open
+`make run app.go` will start the app on `localhost:8080`
+
+You need to get a `credentials.json` file from Google Cloud API.
+
+## tests
+
+there are none yet but stay tuned.
+
