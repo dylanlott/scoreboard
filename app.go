@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -18,6 +19,9 @@ import (
 
 	elogo "github.com/kortemy/elo-go"
 )
+
+// second version of the algorithm, patch version 2
+var version = "0.2.2"
 
 // reward curves for different numbers of players in a game
 var (
@@ -43,18 +47,22 @@ func main() {
 		// fetch games
 		games, err := fetchGameData()
 		if err != nil {
-			log.Fatalf("failed to load game data: %+v", err)
+			log.Printf("error fetching game data: %+v", err)
+			return
 		}
 		// render games
 		g, err := json.Marshal(games)
 		if err != nil {
-			log.Fatalf("failed to marshal data: %+v", err)
+			log.Printf("failed to marshal data: %+v", err)
+			return
 		}
 		// calculate and render scores
 		scores := calculateScores(games)
 		s, err := json.Marshal(scores)
 		if err != nil {
-			log.Fatalf("failed to marshal data: %+v", err)
+			log.Printf("failed to marshal data: %+v", err)
+			errorRes(w, err)
+			return
 		}
 
 		data := map[string]string{
@@ -63,12 +71,22 @@ func main() {
 			"games":        string(g),
 			"scores":       string(s),
 			"total":        fmt.Sprintf("%d", len(games)),
+			"errors":       "",
 		}
 		t.ExecuteTemplate(w, "index.html.tmpl", data)
 	})
 
 	log.Println("listening on", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func errorRes(w http.ResponseWriter, err error) {
+	w.WriteHeader(http.StatusInternalServerError)
+	data := map[string]string{
+		"version": version,
+		"errors":  err.Error(),
+	}
+	t.ExecuteTemplate(w, "index.html.tmpl", data)
 }
 
 // Retrieve a token, saves the token, then returns the generated client.
@@ -128,13 +146,13 @@ func saveToken(path string, token *oauth2.Token) {
 
 // Game is a modeled MTG Game with a set of rankings determined by order of player loss.
 type Game struct {
-	ID          string
-	Date        string
-	Rankings    []string
-	TableZap    string // if table zap is marked, then first place is the winner and the others lose equally, instead of in order as usual
-	DrawGame    string // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
-	RankTotal   int
-	RankAverage int
+	ID          string   // the ID of the game, which also correlates to its number in the game log.
+	Date        string   // the date of the game.
+	Rankings    []string // an ordered list of players with index 0 being the winner and each subsequent position the next rank.
+	TableZap    string   // marks if the game was ended in one resolution.
+	DrawGame    string   // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
+	RankTotal   int      // the total elo scores of the game for determining the skill level of the game.
+	RankAverage int      // the average elo score of the game determined by diviving the number of players from the above rank average.
 }
 
 // Player is a convenience type for player names
@@ -162,13 +180,6 @@ func fetchGameData() ([]Game, error) {
 	// NOTE: spreadsheetId for the game tracker
 	spreadsheetID := "1-qr-ejHx07Hrr35OymMcGRH00-Jzb-k8S8-xS9P5vqk"
 
-	// CSV Schema
-	//
-	// Each row is a game in the data.
-	// Columns C through H map to in-order player rankings for a given game.
-	// This schema supports up to 6 players.
-	//
-	// column schema:  	|   A		 | 	B 	|   C  	|  D  |   E  |     F		| ...........  //									| gameID | date | notes | zap | draw | player 1 | ... player n |
 	readRange := "Ranked game log!A:K"
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
@@ -185,13 +196,25 @@ func fetchGameData() ([]Game, error) {
 	return games, nil
 }
 
+// parseGame is responsible for parsing the raw game data that we get from
+// Google Sheets.
 func parseGameData(values [][]interface{}) ([]Game, error) {
 	var games []Game
 	for idx, row := range values {
 		if idx == 0 {
-			// skip the first row, it's only labels
+			// skip the first row, it contains the game sheet labels
 			continue
 		}
+
+		// This function assumes a CSV sheet with the following schema.
+		// * Each row is a game in the data.
+		// * Columns C through H map to in-order player rankings for a given game.
+		// * This schema supports up to 6 players, because we only have calculated
+		// reward curves for up to 6 players, and there is a drastic drop off in
+		// quantity of games after 4 players, which is the overwhelming average
+		// pod size. The column schema then looks like below.
+		// * column schema: |    A	 | 	 B 	|   C  	|  D  |   E  |     F	|
+		// 					| gameID | date | notes | zap | draw | player 1 |
 
 		gameID := fmt.Sprintf("%d", row[0])
 		date := fmt.Sprintf("%s", row[1])
@@ -209,7 +232,9 @@ func parseGameData(values [][]interface{}) ([]Game, error) {
 		players := row[5:]
 
 		for _, player := range players {
-			g.Rankings = append(g.Rankings, fmt.Sprintf("%s", player))
+			name := fmt.Sprintf("%s", player)
+			name = strings.Trim(name, " ")
+			g.Rankings = append(g.Rankings, name)
 		}
 
 		games = append(games, g)
@@ -217,6 +242,8 @@ func parseGameData(values [][]interface{}) ([]Game, error) {
 	return games, nil
 }
 
+// calculateScores takes a slice of games and calculates their elo scores
+// from default K and D values.
 func calculateScores(games []Game) map[string]int {
 	elo := elogo.NewElo()
 	scores := map[string]int{}
