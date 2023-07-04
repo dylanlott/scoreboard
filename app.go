@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -20,41 +19,51 @@ import (
 	elogo "github.com/kortemy/elo-go"
 )
 
+// reward curves for different numbers of players in a game
+var (
+	twoPlayers   = []float64{1.0, 0}
+	threePlayers = []float64{1.0, 0.5, 0}
+	fourPlayers  = []float64{1.0, 0.5, 0.25, 0}
+	fivePlayers  = []float64{1.0, 0.5, 0.25, 0.12, 0}
+	sixPlayers   = []float64{1.0, 0.5, 0.25, 0.12, 0.05, 0}
+)
+
 //go:embed templates/*
 var resources embed.FS
 
 var t = template.Must(template.ParseFS(resources, "templates/*"))
 
 func main() {
-	port := os.Getenv("PORT")
+	port := os.Getenv("SCOREBOARD_PORT")
 	if port == "" {
 		port = "8080"
-
 	}
 
-	// - [x] Auth with Google API
-	// - [x] Load google sheets data
-	// - [ ] Run the elo score calculations on the current history
-	// - [ ] Show the current elo scores
-
-	fetchGameData()
-
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// fetch games
 		games, err := fetchGameData()
 		if err != nil {
 			log.Fatalf("failed to load game data: %+v", err)
 		}
+		// render games
 		g, err := json.Marshal(games)
 		if err != nil {
 			log.Fatalf("failed to marshal data: %+v", err)
 		}
+		// calculate and render scores
+		scores := calculateScores(games)
+		s, err := json.Marshal(scores)
+		if err != nil {
+			log.Fatalf("failed to marshal data: %+v", err)
+		}
+
 		data := map[string]string{
 			"version":      "0.0.1",
 			"last_updated": time.Now().String(),
 			"games":        string(g),
+			"scores":       string(s),
 			"total":        fmt.Sprintf("%d", len(games)),
 		}
-
 		t.ExecuteTemplate(w, "index.html.tmpl", data)
 	})
 
@@ -119,13 +128,16 @@ func saveToken(path string, token *oauth2.Token) {
 
 // Game is a modeled MTG Game with a set of rankings determined by order of player loss.
 type Game struct {
-	ID       string
-	Date     string
-	Rankings []Player
-	TableZap string // if table zap is marked, then first place is the winner and the others lose equally, instead of in order as usual
-	DrawGame string // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
+	ID          string
+	Date        string
+	Rankings    []string
+	TableZap    string // if table zap is marked, then first place is the winner and the others lose equally, instead of in order as usual
+	DrawGame    string // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
+	RankTotal   int
+	RankAverage int
 }
 
+// Player is a convenience type for player names
 type Player string
 
 func fetchGameData() ([]Game, error) {
@@ -148,7 +160,7 @@ func fetchGameData() ([]Game, error) {
 	}
 
 	// NOTE: spreadsheetId for the game tracker
-	spreadsheetId := "1-qr-ejHx07Hrr35OymMcGRH00-Jzb-k8S8-xS9P5vqk"
+	spreadsheetID := "1-qr-ejHx07Hrr35OymMcGRH00-Jzb-k8S8-xS9P5vqk"
 
 	// CSV Schema
 	//
@@ -156,22 +168,21 @@ func fetchGameData() ([]Game, error) {
 	// Columns C through H map to in-order player rankings for a given game.
 	// This schema supports up to 6 players.
 	//
-	// column schema:  	|   A	 | 	B 	|   C  	|  D  |   E  |     F	| ...........  |
-	// 					| gameID | date | notes | zap | draw | player 1 | ... player n |
+	// column schema:  	|   A		 | 	B 	|   C  	|  D  |   E  |     F		| ...........  //									| gameID | date | notes | zap | draw | player 1 | ... player n |
 	readRange := "Ranked game log!A:K"
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetId, readRange).Do()
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
 	if err != nil {
 		return nil, fmt.Errorf("unable to retrieve data from sheet: %w", err)
 	}
 	if len(resp.Values) == 0 {
 		return nil, fmt.Errorf("no game data found")
-	} else {
-		games, err := parseGameData(resp.Values)
-		if err != nil {
-			return nil, err
-		}
-		return games, nil
 	}
+
+	games, err := parseGameData(resp.Values)
+	if err != nil {
+		return nil, err
+	}
+	return games, nil
 }
 
 func parseGameData(values [][]interface{}) ([]Game, error) {
@@ -190,7 +201,7 @@ func parseGameData(values [][]interface{}) ([]Game, error) {
 		g := Game{
 			ID:       gameID,
 			Date:     date,
-			Rankings: []Player{},
+			Rankings: []string{},
 			TableZap: zap,
 			DrawGame: draw,
 		}
@@ -198,7 +209,7 @@ func parseGameData(values [][]interface{}) ([]Game, error) {
 		players := row[5:]
 
 		for _, player := range players {
-			g.Rankings = append(g.Rankings, Player(fmt.Sprintf("%s", player)))
+			g.Rankings = append(g.Rankings, fmt.Sprintf("%s", player))
 		}
 
 		games = append(games, g)
@@ -208,25 +219,61 @@ func parseGameData(values [][]interface{}) ([]Game, error) {
 
 func calculateScores(games []Game) map[string]int {
 	elo := elogo.NewElo()
-	elo.D = 800
-	elo.K = 40
-
 	scores := map[string]int{}
 
-	for idx, game := range games {
-		players := game.Rankings
-
-		fmt.Printf("# gameID: %v\n", idx)
-
-		for _, player := range players {
-			name := strings.Trim(string(player), " ")
-			if score, ok := scores[name]; !ok {
-				scores[name] = 1500
-			} else {
-				fmt.Printf("v: %v\n", score)
-			}
+	for _, game := range games {
+		if err := scoreGame(elo, scores, game); err != nil {
+			log.Printf("failed to score game: %+v", err)
 		}
 	}
 
 	return scores
+}
+
+func scoreGame(elo *elogo.Elo, scores map[string]int, game Game) error {
+	numPlayers := len(game.Rankings)
+
+	if numPlayers < 2 {
+		return fmt.Errorf("invalid game: not enough players")
+	}
+
+	rankTotal := 0
+	for _, player := range game.Rankings {
+		_, ok := scores[player]
+		if !ok {
+			scores[player] = 1500
+		}
+		rankTotal += scores[player]
+	}
+
+	rankAverage := rankTotal / numPlayers
+	game.RankAverage = rankAverage
+	game.RankTotal = rankTotal
+
+	// assign rewards based on number of players
+	updateScores(elo, scores, game, rankAverage)
+
+	return nil
+}
+
+func updateScores(elo *elogo.Elo, scores map[string]int, game Game, rankAverage int) {
+	for idx, player := range game.Rankings {
+		var ratingsDelta int = 0
+		var playerScore int = scores[player]
+
+		switch {
+		case len(game.Rankings) == 2:
+			ratingsDelta = elo.RatingDelta(playerScore, rankAverage, twoPlayers[idx])
+		case len(game.Rankings) == 3:
+			ratingsDelta = elo.RatingDelta(playerScore, rankAverage, threePlayers[idx])
+		case len(game.Rankings) == 4:
+			ratingsDelta = elo.RatingDelta(playerScore, rankAverage, fourPlayers[idx])
+		case len(game.Rankings) == 5:
+			ratingsDelta = elo.RatingDelta(playerScore, rankAverage, fivePlayers[idx])
+		case len(game.Rankings) == 6:
+			ratingsDelta = elo.RatingDelta(playerScore, rankAverage, sixPlayers[idx])
+		}
+
+		scores[player] += ratingsDelta
+	}
 }
