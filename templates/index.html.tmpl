@@ -3,9 +3,16 @@
 <head>
 </head>
 <body>
-<h1>Scorecard</h1>
+<h1>Scoreboard</h1>
+
+{{ if .scores }}
+  <h2>Scores</h2>
+  <h3>{{ .scores }}</h3>
+{{ end }}
+
 {{ if .games }}
-  <h2>{{.games}} </h2>
+  <h2>{{ .total }} games in the log</h2>
+  <h3>{{ .games }}</h3>
 {{end}}
 </body>
 </html>
