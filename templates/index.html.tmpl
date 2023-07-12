@@ -3,16 +3,14 @@
 <head>
 </head>
 <body>
+
 <h1>Scoreboard</h1>
 
-{{ if .scores }}
-  <h2>Scores</h2>
-  <h3>{{ .scores }}</h3>
-{{ end }}
+<ol>
+{{- range $key, $value := .rankings}}
+  <li>{{$value.Name}} {{$value.Score}}</li>
+{{- end}}
+</ol>
 
-{{ if .games }}
-  <h2>{{ .total }} games in the log</h2>
-  <h3>{{ .games }}</h3>
-{{end}}
 </body>
 </html>
