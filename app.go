@@ -36,13 +36,14 @@ var (
 
 // Game is a modeled MTG Game with a set of rankings determined by order of player loss.
 type Game struct {
-	ID          string   // the ID of the game, which also correlates to its number in the game log.
-	Date        string   // the date of the game.
-	Rankings    []string // an ordered list of players with index 0 being the winner and each subsequent position the next rank.
-	TableZap    string   // marks if the game was ended in one resolution.
-	DrawGame    string   // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
-	RankTotal   int      // the total elo scores of the game for determining the skill level of the game.
-	RankAverage int      // the average elo score of the game determined by diviving the number of players from the above rank average.
+	ID             string   // the ID of the game, which also correlates to its number in the game log.
+	Date           string   // the date of the game.
+	Rankings       []string // an ordered list of players with index 0 being the winner and each subsequent position the next rank.
+	TableZap       string   // marks if the game was ended in one resolution.
+	DrawGame       string   // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
+	RankTotal      int      // the total elo scores of the game for determining the skill level of the game.
+	RankAverage    int      // the average elo score of the game determined by diviving the number of players from the above rank average.
+	TwoHeadedGiant bool     // if the game is a match of multiple players per team, colloquially referred to as a two-headed giant game.
 }
 
 // Player binds a calculated score to a player
@@ -76,6 +77,9 @@ func main() {
 			return
 		}
 
+		// sort by ID to ensure order
+		sort.Sort(ByID(games))
+
 		// calculate and render scores
 		scores := calculateScores(games)
 
@@ -88,9 +92,8 @@ func main() {
 			})
 		}
 
-		// sort by score and ID
+		// sort by score to determine rankings
 		sort.Sort(ByScore(rankings))
-		sort.Sort(ByID(games))
 
 		// create and format a response object
 		data := map[string]interface{}{
@@ -258,9 +261,17 @@ func parseGameData(values [][]interface{}) ([]*Game, error) {
 		for _, player := range players {
 			name := fmt.Sprintf("%s", player)
 			name = strings.Trim(name, " ")
+			if strings.Contains(name, "/") {
+				g.TwoHeadedGiant = true
+				continue
+			}
 			g.Rankings = append(g.Rankings, name)
 		}
 
+		if g.TwoHeadedGiant {
+			// TODO: Handle two headed giant scoring in the future.
+			continue
+		}
 		games = append(games, g)
 	}
 
@@ -279,6 +290,9 @@ func calculateScores(games []*Game) map[string]int {
 		}
 	}
 
+	if verbose {
+		log.Printf("calculated scores: %+v", scores)
+	}
 	return scores
 }
 
@@ -333,6 +347,10 @@ func updateScores(elo *elogo.Elo, scores map[string]int, game *Game) {
 			ratingsDelta = elo.RatingDelta(playerScore, game.RankAverage, fivePlayers[idx])
 		case len(game.Rankings) == 6:
 			ratingsDelta = elo.RatingDelta(playerScore, game.RankAverage, sixPlayers[idx])
+		}
+
+		if verbose {
+			log.Printf("updating player ratings delta %d", ratingsDelta)
 		}
 
 		scores[player] += ratingsDelta
