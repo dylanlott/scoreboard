@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"embed"
-	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
@@ -11,16 +10,15 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	elogo "github.com/kortemy/elo-go"
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
 
 // verbose can be turned on to log calculation output for debugging
-var verbose bool = false
+var verbose bool = true
 
 // second version of the algorithm, patch version 2
 var version = "0.2.3"
@@ -36,14 +34,15 @@ var (
 
 // Game is a modeled MTG Game with a set of rankings determined by order of player loss.
 type Game struct {
-	ID             string   // the ID of the game, which also correlates to its number in the game log.
-	Date           string   // the date of the game.
-	Rankings       []string // an ordered list of players with index 0 being the winner and each subsequent position the next rank.
-	TableZap       string   // marks if the game was ended in one resolution.
-	DrawGame       string   // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
-	RankTotal      int      // the total elo scores of the game for determining the skill level of the game.
-	RankAverage    int      // the average elo score of the game determined by diviving the number of players from the above rank average.
-	TwoHeadedGiant bool     // if the game is a match of multiple players per team, colloquially referred to as a two-headed giant game.
+	ID             string    // the ID of the game, which also correlates to its number in the game log.
+	Date           string    // the date of the game.
+	Timestamp      time.Time // the parsed and formatted timestamp of the game's date for comparison purposes.
+	Rankings       []string  // an ordered list of players with index 0 being the winner and each subsequent position the next rank.
+	TableZap       string    // marks if the game was ended in one resolution.
+	DrawGame       string    // if draw game is marked, the game ended in a draw for all players, so order doesn't matter but players still need to be recorded.
+	RankTotal      int       // the total elo scores of the game for determining the skill level of the game.
+	RankAverage    int       // the average elo score of the game determined by diviving the number of players from the above rank average.
+	TwoHeadedGiant bool      // if the game is a match of multiple players per team, colloquially referred to as a two-headed giant game.
 }
 
 // Player binds a calculated score to a player
@@ -80,6 +79,9 @@ func main() {
 		// sort by ID to ensure order
 		sort.Sort(ByID(games))
 
+		filterByStart(w, r, games)
+		filterByEnd(w, r, games)
+
 		// calculate and render scores
 		scores := calculateScores(games)
 
@@ -114,6 +116,48 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
+func filterByStart(w http.ResponseWriter, r *http.Request, games []*Game) {
+	// filter by start date
+	start := r.URL.Query().Get("start")
+	if start != "" {
+		s, err := time.Parse(time.RFC1123, start)
+		if err != nil {
+			log.Printf("failed to parse request start date parameter: %s", err)
+			errorRes(w, err)
+			return
+		}
+
+		if !s.IsZero() {
+			for idx, game := range games {
+				if game.Timestamp.Before(s) {
+					games = remove(games, idx)
+				}
+			}
+		}
+	}
+}
+
+func filterByEnd(w http.ResponseWriter, r *http.Request, games []*Game) {
+	// filter by end date
+	end := r.URL.Query().Get("end")
+	if end != "" {
+		e, err := time.Parse(time.RFC1123, end)
+		if err != nil {
+			log.Printf("failed to parse request start date parameter: %s", err)
+			errorRes(w, err)
+			return
+		}
+
+		if !e.IsZero() {
+			for idx, game := range games {
+				if game.Timestamp.After(e) {
+					games = remove(games, idx)
+				}
+			}
+		}
+	}
+}
+
 func errorRes(w http.ResponseWriter, err error) {
 	w.WriteHeader(http.StatusInternalServerError)
 	data := map[string]string{
@@ -123,78 +167,14 @@ func errorRes(w http.ResponseWriter, err error) {
 	t.ExecuteTemplate(w, "index.html.tmpl", data)
 }
 
-// Retrieve a token, saves the token, then returns the generated client.
-func getClient(config *oauth2.Config) *http.Client {
-	// The file token.json stores the user's access and refresh tokens, and is
-	// created automatically when the authorization flow completes for the first
-	// time.
-	tokFile := "token.json"
-	tok, err := tokenFromFile(tokFile)
-	if err != nil {
-		tok = getTokenFromWeb(config)
-		saveToken(tokFile, tok)
-	}
-	return config.Client(context.Background(), tok)
-}
-
-// Request a token from the web, then returns the retrieved token.
-func getTokenFromWeb(config *oauth2.Config) *oauth2.Token {
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Go to the following link in your browser then type the "+
-		"authorization code: \n%v\n", authURL)
-
-	var authCode string
-	if _, err := fmt.Scan(&authCode); err != nil {
-		log.Fatalf("Unable to read authorization code: %v", err)
-	}
-
-	tok, err := config.Exchange(context.TODO(), authCode)
-	if err != nil {
-		log.Fatalf("Unable to retrieve token from web: %v", err)
-	}
-	return tok
-}
-
-// Retrieves a token from a local file.
-func tokenFromFile(file string) (*oauth2.Token, error) {
-	f, err := os.Open(file)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	tok := &oauth2.Token{}
-	err = json.NewDecoder(f).Decode(tok)
-	return tok, err
-}
-
-// Saves a token to a file path.
-func saveToken(path string, token *oauth2.Token) {
-	fmt.Printf("Saving credential file to: %s\n", path)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		log.Fatalf("Unable to cache oauth token: %v", err)
-	}
-	defer f.Close()
-	json.NewEncoder(f).Encode(token)
-}
-
 // fetchGameData fetches the raw CSV data from Google Sheets API and then
 // parses it and returns a list of games or an error.
 func fetchGameData() ([]*Game, error) {
 	ctx := context.Background()
-	b, err := os.ReadFile("credentials.json")
-	if err != nil {
-		return nil, fmt.Errorf("failed to read client secret file: %w", err)
-	}
 
-	// If modifying these scopes, delete your previously saved token.json.
-	config, err := google.ConfigFromJSON(b, "https://www.googleapis.com/auth/spreadsheets.readonly")
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse client secret file to config: %w", err)
-	}
-	client := getClient(config)
+	var SCOREBOARD_API_KEY = os.Getenv("SCOREBOARD_API_KEY")
 
-	srv, err := sheets.NewService(ctx, option.WithHTTPClient(client))
+	srv, err := sheets.NewService(ctx, option.WithAPIKey(SCOREBOARD_API_KEY))
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve Google Sheets client: %w", err)
 	}
@@ -248,12 +228,18 @@ func parseGameData(values [][]interface{}) ([]*Game, error) {
 		zap := fmt.Sprintf("%s", row[2])
 		draw := fmt.Sprintf("%s", row[3])
 
+		ts, err := time.Parse(time.RFC1123, date)
+		if err != nil {
+			log.Printf("failed to parse date for game %s on %s: %+v", gameID, date, err)
+		}
+
 		g := &Game{
-			ID:       gameID,
-			Date:     date,
-			Rankings: []string{},
-			TableZap: zap,
-			DrawGame: draw,
+			ID:        gameID,
+			Date:      date,
+			Timestamp: ts,
+			Rankings:  []string{},
+			TableZap:  zap,
+			DrawGame:  draw,
 		}
 
 		players := row[5:]
@@ -355,6 +341,10 @@ func updateScores(elo *elogo.Elo, scores map[string]int, game *Game) {
 
 		scores[player] += ratingsDelta
 	}
+}
+
+func remove(slice []*Game, index int) []*Game {
+	return append(slice[:index], slice[index+1:]...)
 }
 
 func (g ByID) Len() int           { return len(g) }
