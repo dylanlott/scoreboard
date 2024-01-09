@@ -1,4 +1,4 @@
-# scorecard
+# scoreboard
 
 > a minimal leaderboard backed by Google Sheets.
 
